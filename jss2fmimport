@@ -1,0 +1,202 @@
+#!/bin/bash
+
+# Author: Topher Kessler, Blue Apron Inc.
+# Last Revision: 2016-01-30
+#
+# Pulls all mobile and computer info from the JSS to a CSV file for importing to FileMaker
+# Requires an advanced custom search called "AssetTag" in JSS for both mobile and computer devices
+# that returns the following information:
+#     TAG        			DESCRIPTION
+#     name        			device name (builtin)
+#     Asset_Tag   			asset tag (custom)
+#     Wi_Fi_MAC_Address		Wi-Fi MAC Address for iOS devices (mobile only)
+#	  MAC_Address			MAC Address for computer systems (computer only)
+#	  Serial_Number			Serial number (builtin)
+#	  Model					Model description string (builtin)
+#	  Model_Identifier		Model id string (builtin)
+#	  Building				Home building/facility housing the device (custom)
+# 
+# Arg list:
+#   -u --> USERNAME
+#   -p --> PASSWORD
+#   -t --> mobile/computer [all]
+#   -o --> outpath
+
+# TO-DO:
+# 1. Create JSS account for recurring asset import (jssimport/level1)
+#		- jumpcloud --> Casper/JSS, and fmadmins group
+#		- store credentials in FMS system admin acct keychain with entry name "jsslogin"
+#			fmsadmin? <-- convert to local acct?
+#			Admin <-- stay logged in?
+#		- bind to "Security"
+#
+# 2. Load jss password from keychain with the following:
+#    `security find-generic-password -a jssuser -w`
+#	 `security -q find-generic-password -l jsslogin | grep acct | awk -F'=' '{print $2}' | sed 's/\"//g'`
+
+# Default values
+OUTFILE="jssexport.csv"
+TYPE="all"
+VERBOSE=0
+KEYCHAIN=0
+
+#Arg handling
+while [[ $# > 0 ]]; do
+	#key=$1
+	case $1 in
+		-u)
+		USERNAME="$2"
+		shift
+		;;
+		-p)
+		PASSWORD="$2"
+		shift
+		;;
+		-t)
+		TYPE="$2"
+		shift
+		;;
+		-o)
+		OUTFILE="$2"
+		shift
+		;;
+		-v)
+		VERBOSE=1
+		;;
+		-k)
+		KEYCHAIN=1
+		;;
+		*)
+		;;
+	esac
+	shift
+done
+
+#Password handling
+#USERNAME=`security -q find-generic-password -l jsslogin | grep acct | awk -F'=' '{print $2}' | sed 's/\"//g'`
+
+if [ ${#USERNAME} -gt 0 ] && [ ${#PASSWORD} == 0 ]; then
+	# try to find pw in keychain...assumes "jsslogin" entry given access to "security"
+	if [ $KEYCHAIN == 1 ]; then
+		PASSWORD=`security find-internet-password -a $USERNAME -l "data.groundtocloud.net ($USERNAME)" -w`
+	fi
+	if [ ${#PASSWORD} == 0 ]; then
+		read -s -p "Enter Password: " PASSWORD
+		echo
+	fi	
+else
+	if [ ${#USERNAME} == 0 ]; then
+		read -p "Enter Username: " USERNAME
+	fi
+	if [ $KEYCHAIN == 1 ]; then
+		PASSWORD=`security find-internet-password -a $USERNAME -l "data.groundtocloud.net ($USERNAME)" -w`
+	fi
+	if [ ${#PASSWORD} == 0 ]; then
+		read -s -p "Enter Password: " PASSWORD
+		echo
+	fi
+fi
+
+if [ $VERBOSE == 1 ]; then
+	echo "   Username: "$USERNAME
+	echo "  Data Type: "$TYPE
+	echo "Output File: "$OUTFILE
+fi
+
+touch jss_semaphore
+echo name,assetid,macaddress,serialnumber,model,model_identifier,management,facility > $OUTFILE
+TMPFILE=out$RANDOM
+
+function facility {
+	case $1 in
+		'"California"') echo '"RM"' ;;
+		'"Coalition"') echo '"Co"' ;;
+		'"NewJersey"') echo '"JC"' ;;
+		'"NewYork-HQ"') echo '"HQ"' ;;
+		'"Texas"') echo '"TX"' ;;
+		*) echo '""' ;;
+	esac
+}
+
+if [ $TYPE == "mobile" ] || [ $TYPE == "all" ]; then
+	if [ $VERBOSE == 1 ]; then
+		echo "Loading mobile device info from JSS..."
+	fi
+	curl -s https://data.groundtocloud.net/blueapron/JSSResource/advancedmobiledevicesearches/name/AssetTag -u $USERNAME:$PASSWORD -o $TMPDIR/$TMPFILE
+
+	if [ `file -b $TMPDIR/$TMPFILE | awk '{print $1}'` == "XML" ]; then
+
+		COUNT=`xmllint --xpath "string(//mobile_devices/size)" $TMPDIR/$TMPFILE`
+
+		for i in `seq 1 $COUNT`; do
+			if [ $VERBOSE == 1 ]; then 
+				echo -en "\r\033[KProcessing mobile devices: "`echo "scale=2; $i/$COUNT*100" | bc -l | awk -F '.' '{print $1}'`"% ("$i"/"$COUNT") complete..."
+			fi
+			
+			if [ `file -b $TMPDIR/$TMPFILE | awk '{print $1}'` == "XML" ]; then
+				DEVNAME='"'`xmllint --xpath "string(//advanced_mobile_device_search/mobile_devices/mobile_device[$i]/name)" $TMPDIR/$TMPFILE`'"';
+				ASSETID='';
+				ASSETID='"'`xmllint --xpath "string(//advanced_mobile_device_search/mobile_devices/mobile_device[$i]/Asset_Tag)" $TMPDIR/$TMPFILE`'"';
+				MACADDRESS='"'`xmllint --xpath "string(//advanced_mobile_device_search/mobile_devices/mobile_device[$i]/Wi_Fi_MAC_Address)" $TMPDIR/$TMPFILE`'"';
+				SERIALNUMBER='"'`xmllint --xpath "string(//advanced_mobile_device_search/mobile_devices/mobile_device[$i]/Serial_Number)" $TMPDIR/$TMPFILE`'"';
+				MODEL='"'`xmllint --xpath "string(//advanced_mobile_device_search/mobile_devices/mobile_device[$i]/Model)" $TMPDIR/$TMPFILE`'"';
+				MODELID='"'`xmllint --xpath "string(//advanced_mobile_device_search/mobile_devices/mobile_device[$i]/Model_Identifier)" $TMPDIR/$TMPFILE`'"';
+				MANAGEMENT='"'`xmllint --xpath "string(//advanced_mobile_device_search/mobile_devices/mobile_device[$i]/Management)" $TMPDIR/$TMPFILE`'"';
+				FACILITY='"'`xmllint --xpath "string(//advanced_mobile_device_search/mobile_devices/mobile_device[$i]/Building)" $TMPDIR/$TMPFILE | sed 's/\ //g'`'"';
+				#echo $FACILITY"-->"`facility $FACILITY`;
+				if [ ${#ASSETID} -gt 2 ]; then
+					touch jss_semaphore;
+					echo $DEVNAME,$ASSETID,$MACADDRESS,$SERIALNUMBER,$MODEL,$MODELID,$MANAGEMENT,`facility $FACILITY` >> $OUTFILE;
+				fi
+			fi
+		done
+		if [ $VERBOSE == 1 ]; then
+			echo
+		fi
+	fi
+fi
+
+if [ $TYPE == "computer" ] || [ $TYPE == "all" ]; then
+	if [ $VERBOSE == 1 ]; then
+		echo "Loading computer info from JSS..."
+	fi
+	curl -s https://data.groundtocloud.net/blueapron/JSSResource/advancedcomputersearches/name/AssetTag -u $USERNAME:$PASSWORD -o $TMPDIR/$TMPFILE
+
+	if [ `file -b $TMPDIR/$TMPFILE | awk '{print $1}'` == "XML" ]; then
+
+		COUNT=`xmllint --xpath "string(//advanced_computer_search/computers/size)" $TMPDIR/$TMPFILE`
+
+		for i in `seq 1 $COUNT`; do
+			if [ $VERBOSE == 1 ]; then
+				echo -en "\r\033[KProcessing computers: "`echo "scale=2; $i/$COUNT*100" | bc -l | awk -F '.' '{print $1}'`"% ("$i"/"$COUNT") complete...";
+			fi
+			
+			#check if valid XML file...
+			if [ `file -b $TMPDIR/$TMPFILE | awk '{print $1}'` == "XML" ]; then
+				DEVNAME='"'`xmllint --xpath "string(//advanced_computer_search/computers/computer[$i]/name)" $TMPDIR/$TMPFILE`'"';
+				ASSETID='';
+				ASSETID='"'`xmllint --xpath "string(//advanced_computer_search/computers/computer[$i]/Asset_Tag)" $TMPDIR/$TMPFILE`'"';
+				MACADDRESS='"'`xmllint --xpath "string(//advanced_computer_search/computers/computer[$i]/MAC_Address)" $TMPDIR/$TMPFILE`'"';
+				SERIALNUMBER='"'`xmllint --xpath "string(//advanced_computer_search/computers/computer[$i]/Serial_Number)" $TMPDIR/$TMPFILE`'"';
+				MODEL='"'`xmllint --xpath "string(//advanced_computer_search/computers/computer[$i]/Model)" $TMPDIR/$TMPFILE`'"';
+				MODELID='"'`xmllint --xpath "string(//advanced_computer_search/computers/computer[$i]/Model_Identifier)" $TMPDIR/$TMPFILE`'"';
+				MANAGEMENT='"'`xmllint --xpath "string(//advanced_computer_search/computers/computer[$i]/Management)" $TMPDIR/$TMPFILE`'"';
+				FACILITY='"'`xmllint --xpath "string(//advanced_computer_search/computers/computer[$i]/Building)" $TMPDIR/$TMPFILE | sed 's/\ //g'`'"';
+				if [ ${#ASSETID} -gt 2 ]; then
+					touch jss_semaphore;
+					echo $DEVNAME,$ASSETID,$MACADDRESS,$SERIALNUMBER,$MODEL,$MODELID,$MANAGEMENT,`facility $FACILITY` >> $OUTFILE;
+				fi
+			fi
+		done
+		if [ $VERBOSE == 1 ]; then
+			echo
+		fi
+	fi
+fi
+
+PASSWORD="";
+rm jss_semaphore
+rm $TMPDIR/$TMPFILE
+if [ $VERBOSE == 1 ]; then
+	echo "Done!";
+fi
